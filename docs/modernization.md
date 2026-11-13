@@ -51,7 +51,12 @@ live certification.
    than one exists, stop for review. This intentionally does not perform upgrades.
 5. Translate the Stash source path into Whisparr's namespace using the longest
    matching PATH_MAPPING entry. Preview that source directory and match the complete
-   source path. Stop on rejected, missing, or ambiguous previews.
+   source path. Stop on missing or ambiguous previews. Assign the verified
+   StashDB-matched scene through POST `/api/v3/manualimport` and re-evaluate
+   the file before checking rejections. An initial filename-based "Unknown Movie"
+   is not final: the explicit assignment may resolve it. All remaining rejections
+   still stop import. No followed studio or pre-existing Whisparr scene is required.
+   Files may be directly in the import base folder; folderName is optional.
 6. Submit `ManualImport` with `importMode: move`. Wait for completion and require
    exactly one registered file before renaming.
 7. Submit `{"name":"RenameFiles","movieId":10,"files":[99]}` using the actual IDs.
