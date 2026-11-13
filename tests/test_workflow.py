@@ -187,7 +187,7 @@ def test_existing_whisparr_duplicates_never_replaced(tmp_path):
 
 
 @pytest.mark.parametrize('folder', ['missing', None, ''])
-def test_optional_preview_folder_name_uses_source_parent(tmp_path, folder):
+def test_base_folder_import_does_not_require_folder_metadata(tmp_path, folder):
     server = Server()
     original = server.__call__
     def api(method, url, **kwargs):
@@ -200,7 +200,9 @@ def test_optional_preview_folder_name_uses_source_parent(tmp_path, folder):
     workflow = interface(tmp_path, server)
     workflow.http_json = api
     workflow.process_scene()
-    assert posted(server)[0]['files'][0]['folderName'] == 'downloads'
+    payload = sync.ManualImportCommand(**posted(server)[0]).model_dump(exclude_none=True)
+    assert payload['files'][0]['path'] == '/downloads/source.mkv'
+    assert 'folderName' not in payload['files'][0]
 
 
 def test_missing_folder_name_preserves_rejections(tmp_path):
