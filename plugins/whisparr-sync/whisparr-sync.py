@@ -200,7 +200,7 @@ class WhisparrScene(RetrievedModel):
 
 class ManualImportPreviewFile(RetrievedModel):
     path: Path
-    folderName: str
+    folderName: Optional[str] = None
     size: int
     quality: Optional[FileQualityWrapper]
     rejections: List[Any] = Field(default_factory=list)
@@ -536,7 +536,8 @@ class WhisparrInterface:
             raise ManualImportError(f"Whisparr rejected the source: {preview.rejections}")
         self._submit_command(ManualImportCommand(
             importMode="move",
-            files=[ManualImportFile(folderName=preview.folderName, path=source.as_posix(),
+            files=[ManualImportFile(folderName=preview.folderName or source.parent.name,
+                                    path=source.as_posix(),
                                     movieId=self.whisparr_scene.id, quality=preview.quality)],
         ))
 

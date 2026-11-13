@@ -184,3 +184,36 @@ def test_existing_whisparr_duplicates_never_replaced(tmp_path):
     with pytest.raises(sync.WhisparrError, match='Multiple Whisparr files'):
         interface(tmp_path, server).process_scene()
     assert not posted(server)
+
+
+@pytest.mark.parametrize('folder', ['missing', None, ''])
+def test_optional_preview_folder_name_uses_source_parent(tmp_path, folder):
+    server = Server()
+    original = server.__call__
+    def api(method, url, **kwargs):
+        if method == 'GET' and url.endswith('/manualimport'):
+            raw = {'path': '/downloads/source.mkv', 'size': 42, 'quality': None}
+            if folder != 'missing':
+                raw['folderName'] = folder
+            return 200, [sync.ManualImportPreviewFile(**raw)]
+        return original(method, url, **kwargs)
+    workflow = interface(tmp_path, server)
+    workflow.http_json = api
+    workflow.process_scene()
+    assert posted(server)[0]['files'][0]['folderName'] == 'downloads'
+
+
+def test_missing_folder_name_preserves_rejections(tmp_path):
+    server = Server()
+    original = server.__call__
+    def api(method, url, **kwargs):
+        if method == 'GET' and url.endswith('/manualimport'):
+            return 200, [sync.ManualImportPreviewFile(
+                path='/downloads/source.mkv', size=42, quality=None,
+                rejections=[{'reason': 'Unknown Movie'}])]
+        return original(method, url, **kwargs)
+    workflow = interface(tmp_path, server)
+    workflow.http_json = api
+    with pytest.raises(sync.ManualImportError, match='Unknown Movie'):
+        workflow.process_scene()
+    assert not posted(server)
