@@ -516,7 +516,9 @@ class WhisparrInterface:
             raise ManualImportError("Enable MOVE_FILES to let Whisparr import and organize an external source")
         status, previews = self.http_json(
             method="GET", url=f"{self.url}/api/v3/manualimport", api_key=self.key,
-            params={"folder": source.parent.as_posix(), "movieId": self.whisparr_scene.id,
+            # movieId selects the destination-library scan and ignores folder.
+            # Assign the intended movie only in the import command below.
+            params={"folder": source.parent.as_posix(),
                     "filterExistingFiles": True},
             response_model=ManualImportPreviewFile, response_is_list=True,
         )
@@ -524,7 +526,11 @@ class WhisparrInterface:
             raise ManualImportError("Manual import preview failed")
         matches = [p for p in previews if isinstance(p, ManualImportPreviewFile) and p.path == source]
         if len(matches) != 1:
-            raise ManualImportError("Expected exactly one full-path import match; refusing basename fallback")
+            paths = [str(p.path) if isinstance(p, ManualImportPreviewFile) else "invalid preview record"
+                     for p in previews]
+            raise ManualImportError(
+                f"Expected one full-path import match for {source}; preview paths: {paths}"
+            )
         preview = matches[0]
         if preview.rejections:
             raise ManualImportError(f"Whisparr rejected the source: {preview.rejections}")

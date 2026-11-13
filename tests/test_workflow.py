@@ -39,6 +39,10 @@ class Server:
         if route == 'moviefile':
             return 200, list(self.files)
         if route == 'manualimport':
+            # Whisparr ignores folder when movieId is supplied, scanning the
+            # destination library rather than the external download directory.
+            if 'movieId' in kwargs.get('params', {}):
+                return 200, []
             return 200, [sync.ManualImportPreviewFile(
                 path='/wrong/source.mkv' if self.wrong_path else '/downloads/source.mkv',
                 folderName='downloads', size=42, quality=None,
@@ -71,6 +75,9 @@ def test_import_waits_then_renames_with_file_ids(tmp_path):
     interface(tmp_path, server).process_scene()
     assert posted(server)[0]['importMode'] == 'move'
     assert posted(server)[0]['files'][0]['path'] == '/downloads/source.mkv'
+    preview_call = next(kwargs for method, url, kwargs in server.calls
+                        if method == 'GET' and url.endswith('/manualimport'))
+    assert preview_call['params'] == {'folder': '/downloads', 'filterExistingFiles': True}
     assert posted(server)[1] == {'name': 'RenameFiles', 'movieId': 10, 'files': [99]}
     routes = [u for _, u, _ in server.calls]
     assert routes.index('http://whisparr/api/v3/command/1') < routes.index('http://whisparr/api/v3/command/2')
