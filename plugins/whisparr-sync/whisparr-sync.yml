@@ -1,6 +1,6 @@
 name: Whisparr Sync
 description: Add matched StashDB scene to Whisparr on update
-version: 1.0
+version: 1.1
 exec:
   - python
   - "{pluginDir}/whisparr-sync.py"
@@ -32,7 +32,7 @@ settings:
     type: BOOLEAN
   MOVE_FILES:
     displayName: Move Files
-    description: Move files after processing
+    description: Let Whisparr import and move external source files into its library
     type: BOOLEAN
 
   WHISPARR_RENAME:

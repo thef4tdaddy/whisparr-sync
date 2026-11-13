@@ -163,3 +163,11 @@ Custom exceptions used in the sync:
 ## License
 
 This project does not currently include an explicit license. Please open an issue or contact the author for clarification on usage rights.
+
+## Import/rename modernization branch
+
+This fork delegates file movement to Whisparr, waits for asynchronous imports,
+uses the correct `RenameFiles` movie/file IDs, and prevents repeated imports on
+normal repeated hooks. Existing Whisparr-to-Stash notifications remain in charge
+of Stash path updates. See [modernization notes](docs/modernization.md) for path
+mapping, recovery, limitations, and the required small live trial before bulk use.

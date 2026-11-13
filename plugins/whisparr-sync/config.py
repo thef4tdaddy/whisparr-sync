@@ -29,6 +29,9 @@ class PluginConfig(BaseModel):
     ROOT_FOLDER: Optional[Path] = None
     IGNORE_TAGS: List[str] = Field(default_factory=list)
     DEV_MODE: bool = False
+    COMMAND_TIMEOUT: float = Field(default=300, gt=0)
+    COMMAND_POLL_INTERVAL: float = Field(default=1, gt=0)
+    STATE_DIRECTORY: Path = Path(__file__).parent / "state"
 
     # Logging
     LOG_LEVEL: str = "INFO"
