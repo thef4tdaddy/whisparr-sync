@@ -204,6 +204,9 @@ class ManualImportPreviewFile(RetrievedModel):
     size: int
     quality: Optional[FileQualityWrapper]
     rejections: List[Any] = Field(default_factory=list)
+    languages: List[dict] = Field(default_factory=lambda: [{"id": 0, "name": "Unknown"}])
+    releaseGroup: str = ""
+    indexerFlags: int = 0
 
     @field_validator("path", mode="before")
     def convert_path(cls, v: Any) -> Optional[Path]:
@@ -532,13 +535,39 @@ class WhisparrInterface:
                 f"Expected one full-path import match for {source}; preview paths: {paths}"
             )
         preview = matches[0]
+        # Folder scanning only guesses identity from filenames. Explicitly assign
+        # the verified StashDB movie and ask Whisparr to re-evaluate the preview,
+        # just as selecting a movie in Interactive Import does.
+        request = ManualImportFile(
+            path=source.as_posix(), movieId=self.whisparr_scene.id,
+            quality=preview.quality, languages=preview.languages,
+            releaseGroup=preview.releaseGroup, indexerFlags=preview.indexerFlags,
+        )
+        status, reassigned = self.http_json(
+            method="POST", url=f"{self.url}/api/v3/manualimport", api_key=self.key,
+            body=[request.model_dump(mode="json", exclude_none=True, exclude={"folderName"})],
+        )
+        if status not in (200, 202) or not isinstance(reassigned, list) or len(reassigned) != 1:
+            raise ManualImportError("Could not re-evaluate the file for the StashDB-matched scene")
+        item = reassigned[0]
+        if (not isinstance(item, dict) or item.get("path") != source.as_posix()
+                or item.get("movieId") != self.whisparr_scene.id
+                or not isinstance(item.get("movie"), dict)
+                or item["movie"].get("id") != self.whisparr_scene.id
+                or item["movie"].get("foreignId") != self.stash_scene.stashdb_id):
+            raise ManualImportError("Re-evaluated preview did not confirm the intended StashDB identity and path")
+        if not isinstance(item.get("rejections"), list):
+            raise ManualImportError("Re-evaluated preview did not return valid rejection checks")
+        preview = ManualImportPreviewFile.model_validate({**preview.model_dump(), **item})
         if preview.rejections:
             raise ManualImportError(f"Whisparr rejected the source: {preview.rejections}")
         self._submit_command(ManualImportCommand(
             importMode="move",
             files=[ManualImportFile(folderName=preview.folderName or None,
                                     path=source.as_posix(),
-                                    movieId=self.whisparr_scene.id, quality=preview.quality)],
+                                    movieId=self.whisparr_scene.id, quality=preview.quality,
+                                    languages=preview.languages, releaseGroup=preview.releaseGroup,
+                                    indexerFlags=preview.indexerFlags)],
         ))
 
     def _queue_command(self, commandname: str = "RefreshMovie") -> None:

@@ -23,19 +23,34 @@ class Server:
         self.reject = False
         self.wrong_path = False
         self.rename_pending = False
+        self.unknown_movie = False
+        self.reprocess_wrong_identity = False
+        self.exists = True
         self.scene = sync.WhisparrScene(id=10, foreignId='scene-id', title='Scene',
             path='/library/scene', statistics={'movieFileCount': 0, 'sizeOnDisk': 0})
 
     def __call__(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
         route = url.split('/api/v3/')[1]
+        if method == 'POST' and route == 'movie':
+            self.exists = True
+            return 201, self.scene
+        if method == 'POST' and route == 'manualimport':
+            item = dict(kwargs['body'][0])
+            item['movie'] = {'id': 10, 'foreignId': 'wrong' if self.reprocess_wrong_identity else 'scene-id'}
+            item['rejections'] = [{'reason': 'blocked'}] if self.reject else []
+            return 200, [item]
         if method == 'POST':
             command = kwargs['body'].model_dump()
             cid = len(self.commands) + 1
             self.commands[cid] = command
             return 201, {'id': cid}
         if route == 'movie':
-            return 200, [self.scene]
+            return 200, [self.scene] if self.exists else []
+        if route == 'qualityprofile':
+            return 200, [{'id': 1, 'name': 'Any'}]
+        if route == 'rootfolder':
+            return 200, [{'path': '/library'}]
         if route == 'moviefile':
             return 200, list(self.files)
         if route == 'manualimport':
@@ -46,7 +61,7 @@ class Server:
             return 200, [sync.ManualImportPreviewFile(
                 path='/wrong/source.mkv' if self.wrong_path else '/downloads/source.mkv',
                 folderName='downloads', size=42, quality=None,
-                rejections=['blocked'] if self.reject else [])]
+                rejections=['blocked'] if self.reject else ([{'reason': 'Unknown Movie'}] if self.unknown_movie else []))]
         if route.startswith('command/'):
             cid = int(route.split('/')[1])
             if self.status == 'completed' and self.commands[cid]['name'] == 'ManualImport':
@@ -115,7 +130,7 @@ def test_unknown_post_outcome_blocks_retry(tmp_path):
     api = interface(tmp_path, server)
     original = api.http_json
     def lost_response(method, url, **kwargs):
-        if method == 'POST':
+        if method == 'POST' and url.endswith('/command'):
             raise sync.WhisparrError('response lost')
         return original(method, url, **kwargs)
     api.http_json = lost_response
@@ -207,6 +222,7 @@ def test_base_folder_import_does_not_require_folder_metadata(tmp_path, folder):
 
 def test_missing_folder_name_preserves_rejections(tmp_path):
     server = Server()
+    server.reject = True
     original = server.__call__
     def api(method, url, **kwargs):
         if method == 'GET' and url.endswith('/manualimport'):
@@ -216,6 +232,30 @@ def test_missing_folder_name_preserves_rejections(tmp_path):
         return original(method, url, **kwargs)
     workflow = interface(tmp_path, server)
     workflow.http_json = api
-    with pytest.raises(sync.ManualImportError, match='Unknown Movie'):
+    with pytest.raises(sync.ManualImportError, match='blocked'):
         workflow.process_scene()
+    assert not posted(server)
+
+
+def test_new_scene_added_then_assigned_by_stashdb_before_import(tmp_path):
+    server = Server()
+    server.exists = False
+    server.unknown_movie = True
+    interface(tmp_path, server).process_scene()
+    add = next(kwargs['body'] for method, url, kwargs in server.calls
+               if method == 'POST' and url.endswith('/movie'))
+    assert add.foreignId == 'scene-id'
+    assigned = next(kwargs['body'][0] for method, url, kwargs in server.calls
+                    if method == 'POST' and url.endswith('/manualimport'))
+    assert assigned['movieId'] == 10
+    assert assigned['path'] == '/downloads/source.mkv'
+    assert posted(server)[0]['name'] == 'ManualImport'
+    assert posted(server)[1]['name'] == 'RenameFiles'
+
+
+def test_reassignment_to_wrong_identity_never_imports(tmp_path):
+    server = Server()
+    server.reprocess_wrong_identity = True
+    with pytest.raises(sync.ManualImportError, match='intended StashDB identity'):
+        interface(tmp_path, server).process_scene()
     assert not posted(server)
