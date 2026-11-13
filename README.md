@@ -1,173 +1,128 @@
 # Whisparr Sync
 
-Whisparr Sync is a [Stash](https://stashapp.cc/) plugin that syncs scenes into [Whisparr](https://github.com/Whisparr/Whisparr/) when they have a StashDB link. 
+Identify a file in Stash with a StashDB ID, then let Whisparr add the scene,
+import the file, and move/rename it using Whisparr's library settings. The scene
+need not already exist in Whisparr, and following its studio is not required.
 
-Automated management of scene files, including:
+## Install
 
-- Adding movies from Stash to Whisparr
-- Importing files from Stash to Whisparr
-- Moving files to the correct directories
-- Optional renaming of files via Whisparr
+1. In **Stash → Settings → Plugins → Available Plugins**, add:
 
----
-
-## How It Works
-
-- When a scene is updated, if it has a **StashDB ID**, the plugin adds or updates the corresponding movie in Whisparr.  
-- Scenes containing **ignored tags** are **skipped entirely** — no API calls or file processing are performed.  
-- Files associated with the scene can be automatically imported into Whisparr.  
-- Imported files can optionally be moved into the Whisparr directory and queued for renaming.  
-- Detailed logging is provided for both console and file outputs.  
-
----
-## Requirements
-
-- Python 3.10+ (or tomli)
-- Pydantic
-- Requests
-- `stashapi` library (custom Stash API interface)
----
-## Installation
-
-Add this repository to your sources in whisparr. Configure from toml or GUI. 
-
-
-
-Manual Installation:
-
-1. Copy `whisparr-sync.py` and `whisparr-sync.yml` into your Stash plugins directory.  
-2. Install the required Python dependency:
-
-   ```bash
-   pip install stashapp-tools
-   pip install pydantic
-   pip install tomli (Python<3.10)
+   ```text
+   https://github.com/thef4tdaddy/stash-curator/releases/download/stashui-preview/index.yml
    ```
 
-3. Restart or reload Stash to pick up the new plugin.
+   This shared custom source offers Curator and Whisparr Sync separately.
+2. Install **Whisparr Sync** and reload plugins. When replacing a manual copy,
+   back it up and move it outside Stash's plugins directory first. Preserve its
+   `config.toml` and `state/`. Do not run two copies of the hook.
+3. Provide **Python 3.11+ on Linux/macOS** and install the packaged requirements
+   in the Python environment used by Stash (inside its container when using Docker):
 
----
+   ```bash
+   python -m pip install -r /path/to/installed/whisparr-sync/requirements.txt
+   ```
 
-## Configuration
+   Stash's plugin manager does not install Python dependencies for you.
+4. Set the Whisparr URL (including `http://` or `https://`), API key, quality
+   profile, and destination root. Enable **Move Files** and **Enable Whisparr Rename**.
+   Configure output naming rules in Whisparr.
+5. **Set up Whisparr's existing Stash notification connection for import and rename
+   updates.** Verify it targets the intended Stash instance and follow its setup
+   instructions for any companion integration. That connection handles the return
+   update. This plugin adds no callback, starts no Stash scan, and does not change
+   Stash paths or metadata.
+6. Check container mounts and permissions. Whisparr must read/move the source and
+   write the destination. Stash must see the final library location for its existing
+   notification integration to recognize the moved file.
+7. Save one identified Stash scene and verify import, naming, and the return update
+   before bulk use. This flow has been verified live on Whisparr 3.6.6.1943.
 
-| Setting | Description | Default |
-| --- | --- | --- |
-| `WHISPARR_URL` | Base URL to your Whisparr instance. | `"localhost:6969"` |
-| `WHISPARR_API_KEY` | API key from Whisparr (`Settings → General → Security`). | `""` |
-| `STASHDB_ENDPOINT_SUBSTR` | Substring to identify the correct StashDB endpoint in scene external IDs. | `"stashdb.org"` |
-| `MONITORED` | When `true`, new movies are monitored; otherwise unmonitored. | `True` |
-| `MOVE_FILES` | When `true`, files are moved to the Whisparr directory instead of just checked. | `False` |
-| `WHISPARR_RENAME` | When `true`, imported files are queued for renaming. | `True` |
-| `QUALITY_PROFILE` | Default Whisparr quality profile used for new movies. | `"Any"` |
-| `ROOT_FOLDER` | Default root folder path in Whisparr for new movies. If not set, the plugin uses the **first available root folder**. | `None` |
-| `IGNORE_TAGS` | List of tags that cause a scene to be skipped entirely. | `[]` |
-| `MAX_LOG_BODY` | Maximum length of JSON preview when logging HTTP requests/responses. | `1000` |
-| `MAX_PATH_LENGTH` | Maximum length for displaying file paths in logs. | `100` |
+## Configuration and paths
 
-### Logging Configuration
+Files can be directly in the import base folder or nested below it. No per-scene
+input folder is required. Whisparr alone determines the destination layout.
 
-| Setting | Description | Default |
-| --- | --- | --- |
-| `LOG_LEVEL` | Stash / console logging level. | `"INFO"` |
-| `LOG_FILE_ENABLE` | Enable file logging. | `False` |
-| `LOG_FILE_LEVEL` | Logging level for file output. | `"DEBUG"` |
-| `LOG_FILE_LOCATION` | File path for log output; empty = default (`stashtest.log`). | `""` |
-| `LOG_FILE_TYPE` | File logging type: `SINGLE-FILE`, `ROTATING_SIZE`, or `ROTATING_TIME`. | `"SINGLE-FILE"` |
-| `LOG_FILE_MAX_BYTES` | Max size in bytes for `ROTATING_SIZE`. | `5_000_000` |
-| `LOG_FILE_BACKUP_COUNT` | Number of backup logs to keep. | `3` |
-| `LOG_FILE_ROTATE_WHEN` | When to rotate logs for `ROTATING_TIME` (e.g., `"midnight"`). | `"midnight"` |
-| `LOG_FILE_USE_COLOR` | Apply ANSI color codes in log file output. | `False` |
-| `LOG_CONSOLE_ENABLE` | Enable console logging. | `False` |
+Use Stash's plugin settings or create `config.toml` beside the plugin. The package
+includes `config.example.toml` instead of overwriting existing configuration.
+Stash UI settings override file settings. The key option is `WHISPARR_KEY`.
 
+When both containers mount the same host storage at `/media`, no mapping is needed.
+Otherwise `PATH_MAPPING` maps **Whisparr prefixes → Stash container prefixes**:
 
----
+```toml
+WHISPARR_URL = "http://whisparr:6969"
+WHISPARR_KEY = "your-api-key"
+MOVE_FILES = true
+WHISPARR_RENAME = true
+QUALITY_PROFILE = "Any"
+ROOT_FOLDER = "/media/library"
+COMMAND_TIMEOUT = 300
+COMMAND_POLL_INTERVAL = 1
 
-### Whisparr Defaults
-
-- New movies are created in Whisparr using the **quality profile** and **root folder** configured in the plugin settings (`QUALITY_PROFILE` and `ROOT_FOLDER`).  
-- If `ROOT_FOLDER` is not specified, the plugin will use **the first available root folder** from your Whisparr instance.  
-- Adjust these plugin settings if you want different defaults for new movies.
-
----
-
-### Logging
-
-- **Console logging:** Enabled by default with optional color-coded levels.  
-- **File logging:** Supports single-file, size-based rotation, or time-based rotation.  
-- Logs include HTTP request/response previews, file processing steps, and errors.  
-- Logging levels are configurable separately for console and file.
-
----
-### Workflow
-
-1. Reads JSON scene data from Stash via stdin.
-2. Loads plugin configuration and initializes logging.
-3. Fetches the scene from Stash and checks for ignored tags.
-4. Checks if the movie already exists in Whisparr.
-5. Creates the movie in Whisparr if it does not exist.
-6. Processes all files in the scene:
-    - Moves files if needed
-    - Imports files into Whisparr
-    - Optionally queues a rename operation
-
----
-## Workflow Example
-
-```mermaid
-flowchart TD
-    A[Scene Updated in Stash] --> B{Has StashDB ID?}
-    B -- No --> Z[Skip Scene]
-    B -- Yes --> C[Load Plugin Configuration]
-    C --> D{Scene Has Ignored Tag?}
-    D -- Yes --> Z[Skip Scene]
-    D -- No --> E[Check if Movie Exists in Whisparr]
-    E -- Exists --> F[Set Whisparr Scene]
-    E -- Not Exists --> G[Create Movie in Whisparr with Configured Defaults]
-    F --> H[Iterate Scene Files]
-    G --> H
-    H --> I{File in Whisparr Directory?}
-    I -- Yes --> J[Import File if Not Already Imported]
-    I -- No --> K{MOVE_FILES Enabled?}
-    K -- Yes --> L[Move File to Whisparr Directory]
-    K -- No --> M[Skip File]
-    J --> N{WHISPARR_RENAME Enabled?}
-    L --> N
-    N -- Yes --> O[Queue File for Rename]
-    N -- No --> P[File Processing Done]
-    M --> P
-    O --> P
-    P --> Q[All Files Processed]
-    Q --> R[Scene Sync Complete]
+[PATH_MAPPING]
+"/downloads" = "/stash/incoming"
+"/media" = "/stash/library"
 ```
 
----
+A Stash file `/stash/incoming/example.mp4` becomes `/downloads/example.mp4` for
+Whisparr. Longest-prefix matching applies. Use container paths, not NAS host paths.
+Top-level TOML settings belong before `[PATH_MAPPING]`.
+
+Other options include `MONITORED` (default true), `IGNORE_TAGS`, and
+`STASHDB_ENDPOINT_SUBSTR` (default `stashdb.org`). An empty root selects Whisparr's
+first root; select one explicitly when you have multiple libraries.
+
+## Workflow
+
+1. Read the Stash scene's saved StashDB identity; skip unidentified/ignored scenes.
+2. Find that identity in Whisparr or add it using the configured root/profile.
+3. Retain any existing Whisparr file instead of importing/replacing it again.
+4. Match the complete source path, explicitly assign the known scene in Whisparr's
+   import preview, and check the resulting rejections. This resolves filename-based
+   "Unknown Movie" results without bypassing remaining rejection checks.
+5. Submit `ManualImport` in move mode and wait for completion.
+6. Check the rename preview; rename only when needed, verify the result, and log
+   Whisparr's final file path.
+7. Whisparr's existing notifications update Stash. Subsequent hooks reuse the file.
+
+The plugin never moves files itself or copies them into staging folders. It
+requires one source file per Stash scene and stops on multiple existing Whisparr
+files rather than choosing or replacing versions automatically.
+
+## Bulk processing
+
+Run **Sync All Scenes to Whisparr** from Stash's plugin tasks after individual tests
+work. Run one bulk task at a time. It processes scenes sequentially, waiting for
+Whisparr commands before moving on; Stash notification/fingerprint jobs can continue
+past the end of the bulk task.
+
+Bulk mode reads scene IDs through a read-only SQLite connection, shows task progress,
+and writes each outcome immediately to `state/bulk_results.csv`. It continues past
+failed, unidentified, and ignored scenes and logs a final summary. Existing files
+are not re-imported; already-correct names avoid another rename command. Bulk does
+not upgrade or replace existing Whisparr files.
+
+Per-scene locks prevent simultaneous hooks in one installation from importing the
+same scene. Preserve `state/` across updates. Timed-out commands with known IDs are
+checked on the next run. For an unknown submission outcome or failed command,
+inspect Whisparr before clearing that scene's checkpoint. Do not clear all
+checkpoints to force a retry.
 
 ## Troubleshooting
 
-- **Missing settings:** Ensure Whisparr URL and API key are provided.  
-- **No StashDB ID:** Scenes without the configured endpoint substring are skipped silently.  
-- **Ignored tags:** Scenes with any ignored tag are skipped; check the logs to see which tag triggered the skip.  
-- **File move failures:** If `MOVE_FILES=True` and files cannot be moved, check for cross-drive restrictions or permissions.  
-- **Unexpected HTTP errors:** Check the logs for the exact response from Whisparr.
+* Nothing runs: reload plugins, save a scene with a StashDB ID, and check plugin logs.
+* No exact-path match: compare both containers' mounts and returned preview paths.
+  The plugin never falls back to basename matching.
+* Rejected source: fix Whisparr's rejection after explicit identity assignment.
+* Stash has an old path: check Whisparr's existing notification connection, its
+  target instance, permissions, and visibility of the final destination.
+* Installing/updating does not automatically process your library. Save an
+  individual scene or intentionally start bulk processing.
 
----
-## Exceptions
+See [modernization notes](docs/modernization.md) for API references and recovery.
 
-Custom exceptions used in the sync:
-
-- `WhisparrError` – General Whisparr-related error
-- `SceneNotFoundError` – Raised when a scene is missing in Whisparr
-- `ManualImportError` – Raised when manual import fails
-
----
 ## License
 
-This project does not currently include an explicit license. Please open an issue or contact the author for clarification on usage rights.
-
-## Import/rename modernization branch
-
-This fork delegates file movement to Whisparr, waits for asynchronous imports,
-uses the correct `RenameFiles` movie/file IDs, and prevents repeated imports on
-normal repeated hooks. Existing Whisparr-to-Stash notifications remain in charge
-of Stash path updates. See [modernization notes](docs/modernization.md) for path
-mapping, recovery, limitations, and the required small live trial before bulk use.
+Upstream does not currently include an explicit license. Contact its author for
+clarification on usage rights.

@@ -23,6 +23,7 @@ class Server:
         self.reject = False
         self.wrong_path = False
         self.rename_pending = False
+        self.rename_needed = True
         self.unknown_movie = False
         self.reprocess_wrong_identity = False
         self.exists = True
@@ -66,9 +67,11 @@ class Server:
             cid = int(route.split('/')[1])
             if self.status == 'completed' and self.commands[cid]['name'] == 'ManualImport':
                 self.files = [{'id': 99, 'movieId': 10, 'path': '/library/scene/final.mkv'}]
+            if self.status == 'completed' and self.commands[cid]['name'] == 'RenameFiles':
+                self.rename_needed = False
             return 200, {'status': self.status}
         if route == 'rename':
-            return 200, [{}] if self.rename_pending else []
+            return 200, [{}] if self.rename_pending or self.rename_needed else []
         raise AssertionError(route)
 
 
@@ -104,6 +107,7 @@ def test_repeat_hook_does_not_reimport(tmp_path):
     interface(tmp_path, server).process_scene()
     interface(tmp_path, server).process_scene()
     assert sum(c['name'] == 'ManualImport' for c in posted(server)) == 1
+    assert sum(c['name'] == 'RenameFiles' for c in posted(server)) == 1
 
 
 @pytest.mark.parametrize('state', ['failed', 'aborted', 'queued', 'unexpected'])
@@ -259,3 +263,43 @@ def test_reassignment_to_wrong_identity_never_imports(tmp_path):
     with pytest.raises(sync.ManualImportError, match='intended StashDB identity'):
         interface(tmp_path, server).process_scene()
     assert not posted(server)
+
+
+def test_already_organized_scene_submits_no_commands(tmp_path):
+    server = Server()
+    server.files = [{'id': 99, 'movieId': 10, 'path': '/library/scene/final.mkv'}]
+    server.rename_needed = False
+    interface(tmp_path, server).process_scene()
+    assert not posted(server)
+
+
+def test_bulk_reads_database_readonly_and_records_each_outcome(tmp_path, monkeypatch):
+    import csv
+    import sqlite3
+    from types import SimpleNamespace
+    database = tmp_path / 'stash.sqlite'
+    with sqlite3.connect(database) as conn:
+        conn.execute('CREATE TABLE scenes (id INTEGER PRIMARY KEY)')
+        conn.executemany('INSERT INTO scenes VALUES (?)', [(1,), (2,), (3,)])
+    real_connect = sqlite3.connect
+    connections = []
+    def connect(database_arg, **kwargs):
+        connections.append((database_arg, kwargs))
+        return real_connect(database_arg, **kwargs)
+    monkeypatch.setattr(sqlite3, 'connect', connect)
+    stash = SimpleNamespace(get_configuration=lambda: {'general': {'databasePath': str(database)}})
+    monkeypatch.setattr(sync.StashHelpers, 'open_conn', lambda: stash)
+    progress = []
+    monkeypatch.setattr(sync.stash_log, 'progress', progress.append)
+    def process(config, scene_id):
+        if scene_id == 2:
+            raise RuntimeError('scene failed')
+        return 'Success' if scene_id == 3 else 'NoStashDB ID'
+    monkeypatch.setattr(sync, 'process_single_scene', process)
+    config = interface(tmp_path / 'state', Server()).config
+    sync.bulk_processor(config)
+    assert connections == [(database.as_uri() + '?mode=ro', {'uri': True})]
+    with (config.STATE_DIRECTORY / 'bulk_results.csv').open() as record:
+        assert list(csv.reader(record)) == [
+            ['scene_id', 'success'], ['3', 'Success'], ['2', 'Failed'], ['1', 'NoStashDB ID']]
+    assert progress[0] == 0 and progress[-1] == 1

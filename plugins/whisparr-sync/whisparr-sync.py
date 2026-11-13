@@ -377,18 +377,26 @@ class WhisparrInterface:
             else:
                 logger.info("Whisparr already owns a file; skipping re-import and replacement")
             if self.rename:
-                self._queue_command("RenameFiles")
-                status, remaining = self.http_json(
-                    method="GET", url=f"{self.url}/api/v3/rename", api_key=self.key,
-                    params={"movieId": self.whisparr_scene.id},
-                )
-                if status != 200 or remaining != []:
-                    raise WhisparrError("Rename completed but organization still differs from Whisparr naming settings")
+                if self._rename_previews():
+                    self._queue_command("RenameFiles")
+                    if self._rename_previews():
+                        raise WhisparrError("Rename completed but organization still differs from Whisparr naming settings")
+                else:
+                    logger.info("Whisparr naming is already correct; skipping rename command")
             final = self._movie_files()
             if len(final) != 1 or final[0]["id"] != existing[0]["id"] or not final[0].get("path"):
                 raise WhisparrError("Unable to verify the final Whisparr file")
             # Path is authoritative from Whisparr, never reconstructed from the old filename.
             logger.info("Whisparr final file: id=%s path=%s", final[0]["id"], final[0]["path"])
+
+    def _rename_previews(self) -> List[dict]:
+        status, previews = self.http_json(
+            method="GET", url=f"{self.url}/api/v3/rename", api_key=self.key,
+            params={"movieId": self.whisparr_scene.id},
+        )
+        if status != 200 or not isinstance(previews, list):
+            raise WhisparrError("Unable to verify Whisparr naming preview")
+        return previews
 
     def _movie_files(self) -> List[dict]:
         status, files = self.http_json(
@@ -657,7 +665,7 @@ def preprocessor(dev: bool):
                 stash_log.error("No input data received from Stash hook.")
                 return
             STASH_DATA = json.loads(raw_data)
-            toml_path = f'{STASH_DATA.get("PluginDir")}/config.toml'
+            toml_path = str(Path(STASH_DATA.get("PluginDir") or Path(__file__).resolve().parent) / "config.toml")
         except Exception as e:
             print(f"Failed to parse input JSON: {e}")
             return
@@ -737,9 +745,10 @@ def bulk_processor(config: "PluginConfig") -> None:
         sqllite_db_loc = "stash-go.sqlite"
     # Fetch all scene IDs
     try:
-        with sqlite3.connect(sqllite_db_loc) as conn:
+        database_uri = Path(sqllite_db_loc).resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(database_uri, uri=True) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id FROM scenes")
+            cursor.execute("SELECT id FROM scenes ORDER BY id")
             scene_ids: list[int] = [row[0] for row in cursor.fetchall()]
         logger.info(f"Found {len(scene_ids)} scenes")
     except Exception as e:
@@ -750,9 +759,10 @@ def bulk_processor(config: "PluginConfig") -> None:
         logger.error("Stash DB is empty! exiting")
         return
 
-    progress: float = 0
-    progress_step: float = 1 / len(scene_ids)
-    bulk_results: Path = Path(f"{config.LOG_FILE_LOCATION}/bulk_results.csv")
+    config.STATE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    bulk_results = config.STATE_DIRECTORY / "bulk_results.csv"
+    outcomes = {}
+    stash_log.progress(0)
 
     with open(bulk_results, "a", newline="") as records:
         writer = csv.writer(records)
@@ -764,14 +774,15 @@ def bulk_processor(config: "PluginConfig") -> None:
             try:
                 success: str = process_single_scene(config, scene)
                 writer.writerow([scene, success])
-                if i % 50 == 0:
-                    records.flush()
             except Exception as err:
                 logger.error(f"main function error: {err}")
-                writer.writerow([scene, False])
-                records.flush()
-            progress += progress_step
-            # stash_log.progress(progress)
+                success = "Failed"
+                writer.writerow([scene, success])
+            records.flush()
+            outcomes[success] = outcomes.get(success, 0) + 1
+            stash_log.progress(i / len(scene_ids))
+            logger.info("Bulk progress: %d/%d scenes", i, len(scene_ids))
+    logger.info("Bulk run finished: %s. Results: %s", outcomes, bulk_results)
 
 
 def main(
