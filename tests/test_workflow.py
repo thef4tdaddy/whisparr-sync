@@ -395,3 +395,41 @@ def test_core_outage_keeps_reports_and_does_not_interrupt_import(tmp_path, monke
     sync.CoreReporter(config).flush()
     assert delivered == queued
     assert not list((tmp_path / 'core-outbox').glob('*.json'))
+
+
+def test_health_reports_to_kuma_even_when_core_is_unavailable(tmp_path, monkeypatch):
+    config = interface(tmp_path, Server()).config.model_copy(update={
+        'SMUTWORKS_CORE_URL': 'http://core:8794',
+        'SMUTWORKS_CORE_TOKEN': 'whisparr-reporter',
+    })
+    monkeypatch.delenv('SMUTWORKS_CORE_TOKEN', raising=False)
+    monkeypatch.delenv('SMUTWORKS_CORE_TOKEN_FILE', raising=False)
+    monkeypatch.setenv('SMUTWORKS_KUMA_PUSH_URL', 'http://kuma/api/push/test?status=up')
+    calls = []
+
+    def get(_, url, **kwargs):
+        calls.append(('GET', url, kwargs))
+        response = sync.requests.Response()
+        response.status_code = 503 if url.startswith('http://whisparr/') else 200
+        response._content = b'{"ok":true}'
+        response._content_consumed = True
+        return response
+
+    def post(_, url, **kwargs):
+        calls.append(('POST', url, kwargs))
+        raise sync.requests.ConnectionError('Core unavailable')
+
+    monkeypatch.setattr(sync.requests.Session, 'get', get)
+    monkeypatch.setattr(sync.requests.Session, 'post', post)
+    sync.report_health(config)
+    assert [(method, url) for method, url, _ in calls] == [
+        ('GET', 'http://whisparr/api/v3/system/status'),
+        ('POST', 'http://core:8794/v1/health'),
+        ('GET', 'http://kuma/api/push/test'),
+    ]
+    report = calls[1][2]['json']
+    assert report['source'] == 'whisparr-sync'
+    assert report['status'] == calls[2][2]['params']['status'] == 'down'
+    assert report['latency_ms'] == calls[2][2]['params']['ping']
+    assert calls[1][2]['headers'] == {'Authorization': 'Bearer whisparr-reporter'}
+    assert 'headers' not in calls[2][2]

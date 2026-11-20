@@ -22,6 +22,17 @@ can pass `scene_id` and `transfer_id` to attach those reports to a Core transfer
 Reports that cannot reach Core are saved under the plugin's `state/core-outbox`
 directory and retried on a later sync. Preserve the state directory across updates.
 
+### Optional uptime heartbeat
+
+In Stash, run or schedule **Report SmutWorks Health**. It checks that Stash can
+reach the authenticated Whisparr API and sends the result to Core's `/v1/health`.
+Add the plugin's existing Core token to Core's `CORE_HEALTH_TOKENS` map under
+`whisparr-sync`. To also report to Uptime Kuma, set `SMUTWORKS_KUMA_PUSH_URL` in
+the Stash container to the full URL from a dedicated Kuma Push monitor.
+Either destination can be configured independently. Set **SmutWorks heartbeat
+interval** to match the scheduler and Kuma monitor. Regular import hooks keep
+reporting job events. Running the health task never starts an import.
+
 Identify a file in Stash with a StashDB ID, then let Whisparr add the scene,
 import the file, and move/rename it using Whisparr's library settings. The scene
 need not already exist in Whisparr, and following its studio is not required.

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 
 import requests
@@ -135,6 +135,60 @@ class CoreReporter:
         except (OSError, ValueError):
             self.next_send = time.monotonic() + 30
             logger.warning("Could not send SmutWorks Core reports; queued reports kept for retry")
+
+
+def report_health(config: PluginConfig) -> None:
+    """Check Whisparr without starting a sync, then report to both destinations."""
+    reporter = CoreReporter(config)
+    kuma_url = os.getenv("SMUTWORKS_KUMA_PUSH_URL", "").strip()
+    if not reporter.endpoint and not kuma_url:
+        logger.info("No SmutWorks health destinations configured")
+        return
+    started = time.monotonic()
+    with requests.Session() as session:
+        session.trust_env = False
+        try:
+            with session.get(
+                config.WHISPARR_URL.rstrip("/") + "/api/v3/system/status",
+                headers={"X-Api-Key": config.WHISPARR_KEY}, timeout=(2, 3),
+                allow_redirects=False, stream=True,
+            ) as response:
+                up = 200 <= response.status_code < 300
+                message = "Whisparr API reachable" if up else f"Whisparr returned HTTP {response.status_code}"
+        except (OSError, ValueError):
+            up, message = False, "Whisparr API could not be reached"
+        report = {
+            "source": "whisparr-sync", "instance": reporter.instance,
+            "status": "up" if up else "down", "message": message,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "interval_seconds": config.SMUTWORKS_HEALTH_INTERVAL,
+        }
+        if reporter.endpoint:
+            try:
+                with session.post(
+                    reporter.endpoint.removesuffix("/events") + "/health", json=report,
+                    headers={"Authorization": f"Bearer {reporter.token}"}, timeout=(2, 3),
+                    allow_redirects=False, stream=True,
+                ) as response:
+                    if not 200 <= response.status_code < 300:
+                        logger.warning("Core heartbeat was rejected (HTTP %s)", response.status_code)
+            except (OSError, ValueError):
+                logger.warning("Could not send the heartbeat to Core")
+        if kuma_url:
+            try:
+                parsed = urlsplit(kuma_url)
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None:
+                    raise ValueError
+                params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+                params.update(status=report["status"], msg=message, ping=report["latency_ms"])
+                with session.get(
+                    parsed._replace(query="", fragment="").geturl(), params=params,
+                    timeout=(2, 3), allow_redirects=False,
+                ) as response:
+                    if not 200 <= response.status_code < 300 or response.json().get("ok") is not True:
+                        logger.warning("Uptime Kuma did not accept the heartbeat")
+            except (OSError, ValueError, AttributeError):
+                logger.warning("Could not send the heartbeat to Uptime Kuma")
 
 
 # =========================
@@ -913,13 +967,16 @@ def main(
     if not config:
         stash_log.error("Configuration could not be loaded; exiting.")
         return
+    args = StashHelpers.STASH_DATA.get("args") or {}
+    if args.get("mode") == "health":
+        report_health(config)
+        return
     if bulk:
         logger.debug("Bulk update started")
         bulk_processor(config=config)
     else:
         logger.debug("Starting stage 2 - get Scene ID")
         # 2. Determine scene ID
-        args = StashHelpers.STASH_DATA.get("args") or {}
         hook_context: dict = args.get(
             "hookContext"
         ) or {}

@@ -36,6 +36,7 @@ class PluginConfig(BaseModel):
     SMUTWORKS_CORE_URL: str = ""
     SMUTWORKS_CORE_TOKEN: str = Field(default="", repr=False)
     SMUTWORKS_STASH_INSTANCE: str = "solo"
+    SMUTWORKS_HEALTH_INTERVAL: int = Field(default=60, ge=5, le=86400)
 
     # Logging
     LOG_LEVEL: str = "INFO"
