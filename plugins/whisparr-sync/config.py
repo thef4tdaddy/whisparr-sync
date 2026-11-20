@@ -33,6 +33,10 @@ class PluginConfig(BaseModel):
     COMMAND_POLL_INTERVAL: float = Field(default=1, gt=0)
     STATE_DIRECTORY: Path = Path(__file__).parent / "state"
 
+    SMUTWORKS_CORE_URL: str = ""
+    SMUTWORKS_CORE_TOKEN: str = Field(default="", repr=False)
+    SMUTWORKS_STASH_INSTANCE: str = "solo"
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE_ENABLE: bool = False
@@ -122,7 +126,7 @@ def load_plugin_config(
         try:
             stash_config = stash_api.get_configuration()
             plugin_cfg = stash_config.get("plugins", {}).get("whisparr-sync", {})
-            stash_log.debug(f"SettingsFromUI: {plugin_cfg}")
+            stash_log.debug(f"SettingsFromUI: {safe_json_preview(plugin_cfg)}")
             merged.update(plugin_cfg)
         except Exception as e:
             stash_log.error(f"Failed to load Stash plugin settings: {e}")
@@ -167,7 +171,7 @@ def safe_json_preview(data: Any) -> str:
     try:
         if isinstance(data, dict):
             redacted = dict(data)
-            for k in ("apiKey", "X-Api-Key", "apikey", "WHISPARR_KEY"):
+            for k in ("apiKey", "X-Api-Key", "apikey", "WHISPARR_KEY", "SMUTWORKS_CORE_TOKEN"):
                 if k in redacted:
                     redacted[k] = "***REDACTED***"
             text = json.dumps(redacted, default=str)
@@ -193,7 +197,6 @@ def switch_scene_log(logger: logging.Logger, scene_id: int):
             handler.stream = handler._open()
             logger.info(f"Logging switched to scene {scene_id}")
             return
-    raise RuntimeError("No FileHandler found to switch log file")
 
 
 class ColoredFormatter(logging.Formatter):

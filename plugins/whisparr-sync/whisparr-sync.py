@@ -8,10 +8,15 @@ import hashlib
 import csv
 import json
 import logging
+import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 import requests
 import tomli
@@ -40,6 +45,96 @@ class SceneNotFoundError(WhisparrError):
 
 class ManualImportError(WhisparrError):
     pass
+
+
+class CoreReporter:
+    """Persist reports before sending so retries retain the original event ID."""
+
+    def __init__(self, config: PluginConfig):
+        self.directory = config.STATE_DIRECTORY / "core-outbox"
+        self.instance = config.SMUTWORKS_STASH_INSTANCE.strip() or "solo"
+        self.endpoint = ""
+        self.next_send = 0.0
+        url = config.SMUTWORKS_CORE_URL.strip().rstrip("/")
+        if not url:
+            return
+        try:
+            parsed = urlsplit(url)
+            token_file = os.getenv("SMUTWORKS_CORE_TOKEN_FILE")
+            self.token = (
+                Path(token_file).read_text() if token_file
+                else os.getenv("SMUTWORKS_CORE_TOKEN", config.SMUTWORKS_CORE_TOKEN)
+            ).strip()
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname or
+                    parsed.username is not None or parsed.query or parsed.fragment or
+                    len(self.instance) > 200 or not self.token or not self.token.isascii() or
+                    any(character.isspace() for character in self.token)):
+                raise ValueError
+            self.endpoint = url + "/v1/events"
+        except (OSError, ValueError):
+            logger.warning("SmutWorks Core reporting is disabled: check the Core URL, token and Stash instance")
+
+    def emit(self, scene_id, transfer_id, kind, status, message):
+        if not self.endpoint:
+            return
+        event_id = uuid4().hex
+        event = {
+            "event_id": event_id,
+            "source": "whisparr-sync",
+            "kind": kind,
+            "status": status,
+            "message": message[:500],
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "stash_instance": self.instance,
+            "scene_id": str(scene_id),
+        }
+        if isinstance(transfer_id, str) and 0 < len(transfer_id) <= 200:
+            event["transfer_id"] = transfer_id
+        temporary = None
+        try:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with NamedTemporaryFile(mode="w", dir=self.directory, delete=False) as output:
+                temporary = Path(output.name)
+                json.dump(event, output)
+            temporary.replace(self.directory / f"{time.time_ns()}-{event_id}.json")
+        except (OSError, ValueError):
+            if temporary:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            logger.warning("Could not save a SmutWorks Core report")
+            return
+        self.flush()
+
+    def flush(self):
+        if time.monotonic() < self.next_send:
+            return
+        try:
+            with (self.directory / "send.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return
+                with requests.Session() as session:
+                    session.trust_env = False
+                    deadline = time.monotonic() + 1.5
+                    for path in sorted(self.directory.glob("*.json")):
+                        if time.monotonic() >= deadline:
+                            break
+                        with session.post(
+                            self.endpoint, data=path.read_bytes(),
+                            headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+                            timeout=(0.5, 0.75), allow_redirects=False, stream=True,
+                        ) as response:
+                            if not 200 <= response.status_code < 300:
+                                self.next_send = time.monotonic() + 30
+                                logger.warning("SmutWorks Core returned HTTP %s; reports kept for retry", response.status_code)
+                                break
+                        path.unlink()
+        except (OSError, ValueError):
+            self.next_send = time.monotonic() + 30
+            logger.warning("Could not send SmutWorks Core reports; queued reports kept for retry")
 
 
 # =========================
@@ -328,6 +423,7 @@ class WhisparrInterface:
         config: PluginConfig,
         stash_scene: StashSceneModel,
         http_func: Callable[..., Tuple[int, Any]] = http_json,
+        report: Optional[Callable[[str, str, str], None]] = None,
     ):
         self.stash_scene: StashSceneModel = stash_scene
         self.whisparr_scene: Optional[WhisparrScene] = None
@@ -341,6 +437,7 @@ class WhisparrInterface:
         self.qualprofile: str = config.QUALITY_PROFILE
         self.config: Dict = config
         self.filenames: str = stash_scene.files
+        self.report = report or (lambda kind, status, message: None)
 
     def process_scene(self) -> None:
         # Hooks can overlap. Keep the lock for the entire command lifecycle.
@@ -376,6 +473,7 @@ class WhisparrInterface:
                     raise ManualImportError("Import completed without exactly one registered movie file")
             else:
                 logger.info("Whisparr already owns a file; skipping re-import and replacement")
+                self.report("import.already_registered", "ok", "Whisparr already has this file")
             if self.rename:
                 if self._rename_previews():
                     self._queue_command("RenameFiles")
@@ -388,6 +486,7 @@ class WhisparrInterface:
                 raise WhisparrError("Unable to verify the final Whisparr file")
             # Path is authoritative from Whisparr, never reconstructed from the old filename.
             logger.info("Whisparr final file: id=%s path=%s", final[0]["id"], final[0]["path"])
+            self.report("file.registered", "ok", f"Whisparr file {final[0]['id']}: {final[0]['path']}")
 
     def _rename_previews(self) -> List[dict]:
         status, previews = self.http_json(
@@ -438,8 +537,11 @@ class WhisparrInterface:
         if status not in (200, 201) or not isinstance(response, dict) or not isinstance(response.get("id"), int):
             raise WhisparrError("Command submission outcome unknown; checkpoint retained")
         self.checkpoint.write_text(json.dumps({"name": command.name, "id": response["id"]}))
+        stage = {"ManualImport": "import", "RenameFiles": "rename"}.get(command.name, "refresh")
+        self.report(f"{stage}.accepted", "running", f"Whisparr accepted {command.name} command {response['id']}")
         self._wait_for_command(response["id"])
         self.checkpoint.unlink()
+        self.report(f"{stage}.completed", "ok", f"Whisparr completed {command.name} command {response['id']}")
 
     def _source_path(self) -> Path:
         source = self.stash_scene.paths[0]
@@ -673,8 +775,7 @@ def preprocessor(dev: bool):
         dev_config = load_from_toml(toml_path)
         stash_log.info(f"TOML config:")
         stash_log.info(f"------------")
-        for thing, data in dev_config.items():
-            stash_log.info(f"{thing}|{data}")
+        stash_log.info(safe_json_preview(dev_config))
         stash_log.info(f"------------")
         STASH_DATA["server_connection"] = dev_config.get("STASH_CONFIG")
     StashHelpers.STASH_DATA = STASH_DATA
@@ -689,27 +790,37 @@ def preprocessor(dev: bool):
     return config
 
 
-def process_single_scene(config, scene_id):
+def process_single_scene(config, scene_id, transfer_id=None, reporter=None):
+    reporter = reporter if reporter is not None else CoreReporter(config)
+
+    def report(kind, status, message):
+        reporter.emit(scene_id, transfer_id, kind, status, message)
+
     switch_scene_log(logger, f"{scene_id}")
-    logger.info("SCENEID %d STARTING", scene_id)
-    stash = StashHelpers.open_conn()
+    logger.info("SCENEID %s STARTING", scene_id)
+    report("sync.started", "running", "Starting Whisparr sync")
     scene = None
     try:
+        stash = StashHelpers.open_conn()
         scene_data = stash.find_scene(scene_id)
         if not scene_data:
             logger.error("Scene %s not found in Stash.", scene_id)
+            report("sync.failed", "failed", "Scene not found in Stash")
             return "Failed"
         scene = StashSceneModel(
             **scene_data, stashdb_endpoint_substr=config.STASHDB_ENDPOINT_SUBSTR
         )
     except ValidationError as e:
         logger.exception("Scene data validation failed: %s", e)
+        report("sync.failed", "failed", "Stash returned invalid scene data")
         return "Failed"
     except Exception as e:
         logger.exception("Unexpected error fetching scene: %s", e)
+        report("sync.failed", "failed", "Could not read the scene from Stash")
         return "Failed"
     if scene.stashdb_id is None:
         logger.error("No StashDB ID for %s, skipping", scene.title)
+        report("sync.skipped", "warning", "Scene has no StashDB ID")
         return "NoStashDB ID"
     logger.info("Processing scene: %s", scene.title)
     ignored_tag = has_ignored_tag(scene, config.IGNORE_TAGS)
@@ -717,16 +828,22 @@ def process_single_scene(config, scene_id):
         logger.info(
             "Scene '%s' skipped due to ignored tag: %s", scene.title, ignored_tag
         )
+        report("sync.skipped", "ok", "Scene has an ignored tag")
         return "SkippedTag"
-    whisparr = WhisparrInterface(config=config, stash_scene=scene)
+    whisparr = WhisparrInterface(config=config, stash_scene=scene, report=report)
     try:
         whisparr.process_scene()
         logger.info("Scene processing completed successfully.")
     except WhisparrError as e:
         logger.exception("Whisparr processing error: %s", e)
+        if e.__cause__ is not None or str(e).startswith("HTTP "):
+            report("sync.failed", "failed", "Whisparr request failed; see the Stash plugin log")
+        else:
+            report("sync.failed", "failed", str(e).replace(config.WHISPARR_KEY, "[redacted]"))
         return "Failed"
     except Exception as e:
         logger.exception(f"Unexpected error during scene processing: {e}")
+        report("sync.failed", "failed", "Unexpected Whisparr Sync error; see the Stash plugin log")
         return "Failed"
     return "Success"
 
@@ -761,6 +878,7 @@ def bulk_processor(config: "PluginConfig") -> None:
 
     config.STATE_DIRECTORY.mkdir(parents=True, exist_ok=True)
     bulk_results = config.STATE_DIRECTORY / "bulk_results.csv"
+    reporter = CoreReporter(config)
     outcomes = {}
     stash_log.progress(0)
 
@@ -772,7 +890,7 @@ def bulk_processor(config: "PluginConfig") -> None:
         for i, scene in enumerate(reversed(scene_ids), start=1):
             # stash_log.debug(f"Processing Scene: {scene}")
             try:
-                success: str = process_single_scene(config, scene)
+                success: str = process_single_scene(config, scene, reporter=reporter)
                 writer.writerow([scene, success])
             except Exception as err:
                 logger.error(f"main function error: {err}")
@@ -805,7 +923,7 @@ def main(
         hook_context: dict = args.get(
             "hookContext"
         ) or {}
-        scene_id = scene_id or hook_context.get("id")
+        scene_id = scene_id or hook_context.get("id") or args.get("scene_id")
         if not scene_id:
             stash_log.info("No scene ID provided by hook.")
             if args.get("mode") == "bulk":
@@ -814,7 +932,8 @@ def main(
             else:
                 stash_log.error("No Scene ID and not bulk, exiting")
                 return
-        process_single_scene(config=config, scene_id=scene_id)
+        else:
+            process_single_scene(config=config, scene_id=scene_id, transfer_id=args.get("transfer_id"))
 
 
 if __name__ == "__main__":

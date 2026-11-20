@@ -291,7 +291,7 @@ def test_bulk_reads_database_readonly_and_records_each_outcome(tmp_path, monkeyp
     monkeypatch.setattr(sync.StashHelpers, 'open_conn', lambda: stash)
     progress = []
     monkeypatch.setattr(sync.stash_log, 'progress', progress.append)
-    def process(config, scene_id):
+    def process(config, scene_id, reporter=None):
         if scene_id == 2:
             raise RuntimeError('scene failed')
         return 'Success' if scene_id == 3 else 'NoStashDB ID'
@@ -303,3 +303,95 @@ def test_bulk_reads_database_readonly_and_records_each_outcome(tmp_path, monkeyp
         assert list(csv.reader(record)) == [
             ['scene_id', 'success'], ['3', 'Success'], ['2', 'Failed'], ['1', 'NoStashDB ID']]
     assert progress[0] == 0 and progress[-1] == 1
+
+
+def test_core_reports_commands_and_registered_path(tmp_path, monkeypatch):
+    server = Server()
+    api = interface(tmp_path, server)
+    config = api.config.model_copy(update={
+        'SMUTWORKS_CORE_URL': 'http://core:8794',
+        'SMUTWORKS_CORE_TOKEN': 'reporter-secret',
+        'SMUTWORKS_STASH_INSTANCE': 'stash-solo',
+    })
+    monkeypatch.setattr(sync.StashHelpers, 'open_conn', lambda: FakeStash(api.stash_scene))
+    monkeypatch.setattr(sync, 'WhisparrInterface',
+        lambda **kwargs: type(api)(http_func=server, **kwargs))
+    monkeypatch.delenv('SMUTWORKS_CORE_TOKEN_FILE', raising=False)
+    monkeypatch.delenv('SMUTWORKS_CORE_TOKEN', raising=False)
+    received = []
+
+    def accept(_, url, *, data, headers, allow_redirects, **kwargs):
+        assert url == 'http://core:8794/v1/events'
+        assert headers['Authorization'] == 'Bearer reporter-secret'
+        assert allow_redirects is False
+        received.append(json.loads(data))
+        response = sync.requests.Response()
+        response.status_code = 200
+        response._content_consumed = True
+        return response
+
+    monkeypatch.setattr(sync.requests.Session, 'post', accept)
+    assert sync.process_single_scene(config, 42, transfer_id='seedbox-pull:test') == 'Success'
+    assert [event['kind'] for event in received] == [
+        'sync.started', 'import.accepted', 'import.completed',
+        'rename.accepted', 'rename.completed', 'file.registered',
+    ]
+    assert all(event['source'] == 'whisparr-sync' and event['stash_instance'] == 'stash-solo'
+               and event['scene_id'] == '42' and event['transfer_id'] == 'seedbox-pull:test'
+               for event in received)
+    assert 'command 1' in received[1]['message']
+    assert '/library/scene/final.mkv' in received[-1]['message']
+    assert len({event['event_id'] for event in received}) == len(received)
+    assert not list((tmp_path / 'core-outbox').glob('*.json'))
+
+
+class FakeStash:
+    def __init__(self, scene):
+        self.scene = scene
+
+    def find_scene(self, _):
+        return {
+            'files': [{'path': str(path)} for path in self.scene.paths],
+            'stash_ids': [{'endpoint': 'https://stashdb.org/graphql', 'stash_id': 'scene-id'}],
+        }
+
+
+def test_core_outage_keeps_reports_and_does_not_interrupt_import(tmp_path, monkeypatch):
+    server = Server()
+    api = interface(tmp_path, server)
+    config = api.config.model_copy(update={
+        'SMUTWORKS_CORE_URL': 'http://core:8794',
+        'SMUTWORKS_CORE_TOKEN': 'reporter-secret',
+    })
+    monkeypatch.delenv('SMUTWORKS_CORE_TOKEN_FILE', raising=False)
+    monkeypatch.delenv('SMUTWORKS_CORE_TOKEN', raising=False)
+    monkeypatch.setattr(sync.StashHelpers, 'open_conn', lambda: FakeStash(api.stash_scene))
+    monkeypatch.setattr(sync, 'WhisparrInterface',
+        lambda **kwargs: type(api)(http_func=server, **kwargs))
+    attempted = []
+
+    def offline(_, url, *, data, **kwargs):
+        attempted.append(json.loads(data)['event_id'])
+        raise sync.requests.ConnectionError('Core unavailable')
+
+    monkeypatch.setattr(sync.requests.Session, 'post', offline)
+    assert sync.process_single_scene(config, 42) == 'Success'
+    assert len(attempted) == 1
+    paths = sorted((tmp_path / 'core-outbox').glob('*.json'))
+    queued = [json.loads(path.read_bytes()) for path in paths]
+    assert len(queued) == 6
+    assert queued[0]['event_id'] == attempted[0]
+    assert server.files[0]['path'] == '/library/scene/final.mkv'
+    delivered = []
+
+    def online(_, url, *, data, **kwargs):
+        delivered.append(json.loads(data))
+        response = sync.requests.Response()
+        response.status_code = 200
+        response._content_consumed = True
+        return response
+
+    monkeypatch.setattr(sync.requests.Session, 'post', online)
+    sync.CoreReporter(config).flush()
+    assert delivered == queued
+    assert not list((tmp_path / 'core-outbox').glob('*.json'))

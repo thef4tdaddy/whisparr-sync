@@ -1,5 +1,27 @@
 # Whisparr Sync
 
+## Report to SmutWorks Core
+
+Enable the `whisparr-sync` reporter on [SmutWorks Core](https://github.com/thef4tdaddy/smutworks-suite-core)
+by adding a dedicated token to Core's `CORE_REPORT_TOKENS`:
+
+```dotenv
+CORE_REPORT_TOKENS='{"whisparr-sync":"your-reporter-token"}'
+```
+
+In Stash's Whisparr Sync settings, set **SmutWorks Core URL** to the Core base URL
+reachable from the Stash container and **SmutWorks Stash instance** to `solo` (or
+another stable label if configuring multiple instances). Set `SMUTWORKS_CORE_TOKEN`
+in the plugin's local `config.toml` or the Stash container's environment. To use a
+mounted secret, set `SMUTWORKS_CORE_TOKEN_FILE` in the container instead.
+
+The plugin sends sync starts, accepted and completed import/rename commands,
+final paths registered by Whisparr, and skipped or failed syncs to `/v1/events`.
+Reports include the Stash instance and scene ID. An explicit plugin invocation
+can pass `scene_id` and `transfer_id` to attach those reports to a Core transfer.
+Reports that cannot reach Core are saved under the plugin's `state/core-outbox`
+directory and retried on a later sync. Preserve the state directory across updates.
+
 Identify a file in Stash with a StashDB ID, then let Whisparr add the scene,
 import the file, and move/rename it using Whisparr's library settings. The scene
 need not already exist in Whisparr, and following its studio is not required.

@@ -1,6 +1,6 @@
 name: Whisparr Sync
 description: Add matched StashDB scene to Whisparr on update
-version: 1.1
+version: 1.2
 exec:
   - python
   - "{pluginDir}/whisparr-sync.py"
@@ -53,6 +53,16 @@ settings:
   IGNORE_TAGS:
     displayName: Ignore Tags
     description: List of tags to ignore when adding
+    type: STRING
+
+  SMUTWORKS_CORE_URL:
+    displayName: SmutWorks Core URL
+    description: Base URL of the Core dashboard and event API. Leave blank to disable reporting.
+    type: STRING
+
+  SMUTWORKS_STASH_INSTANCE:
+    displayName: SmutWorks Stash instance
+    description: Stable label for this Stash, such as solo or couples.
     type: STRING
 
   # =========================
