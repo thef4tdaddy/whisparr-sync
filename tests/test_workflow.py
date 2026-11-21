@@ -356,6 +356,23 @@ class FakeStash:
         }
 
 
+def test_scene_without_stashdb_id_reports_an_informational_skip(tmp_path, monkeypatch):
+    server = Server()
+    api = interface(tmp_path, server)
+    stash = FakeStash(api.stash_scene)
+    monkeypatch.setattr(stash, 'find_scene', lambda _: {'files': [], 'stash_ids': []})
+    monkeypatch.setattr(sync.StashHelpers, 'open_conn', lambda: stash)
+    received = []
+
+    class Reporter:
+        def emit(self, *args):
+            received.append(args)
+
+    assert sync.process_single_scene(api.config, 42, reporter=Reporter()) == 'NoStashDB ID'
+    assert received[-1] == (42, None, 'sync.skipped', 'ok', 'Waiting for a StashDB ID')
+    assert not server.calls
+
+
 def test_core_outage_keeps_reports_and_does_not_interrupt_import(tmp_path, monkeypatch):
     server = Server()
     api = interface(tmp_path, server)

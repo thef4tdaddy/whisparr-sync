@@ -873,8 +873,8 @@ def process_single_scene(config, scene_id, transfer_id=None, reporter=None):
         report("sync.failed", "failed", "Could not read the scene from Stash")
         return "Failed"
     if scene.stashdb_id is None:
-        logger.error("No StashDB ID for %s, skipping", scene.title)
-        report("sync.skipped", "warning", "Scene has no StashDB ID")
+        logger.info("Waiting for a StashDB ID for %s", scene.title)
+        report("sync.skipped", "ok", "Waiting for a StashDB ID")
         return "NoStashDB ID"
     logger.info("Processing scene: %s", scene.title)
     ignored_tag = has_ignored_tag(scene, config.IGNORE_TAGS)
